@@ -10,7 +10,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from pymongo import MongoClient
-import requests
 
 class LoginForm(QWidget):
     def __init__(self):
@@ -325,55 +324,44 @@ class AdminViewCsvDialog(QDialog):
 class AssignFolderDialog(QDialog):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Assign File to Employer")
-        self.setGeometry(300, 300, 600, 400)
-        self.mongo_uri = os.getenv('MONGO_URI')
+        self.setWindowTitle("Assign Folder to Employer")
+        self.setGeometry(200, 200, 400, 300)
+
         self.layout = QVBoxLayout()
-
-        self.csv_list_widget = QListWidget()
-        self.layout.addWidget(self.csv_list_widget)
-
-        self.link_input = QLineEdit(self)
-        self.link_input.setPlaceholderText("Enter Google Drive shareable link")
-        self.layout.addWidget(self.link_input)
-
-        self.assign_button = QPushButton("Assign to Employer", self)
-        self.assign_button.clicked.connect(self.assign_link_to_employer)
-        self.layout.addWidget(self.assign_button)
-
+        self.employee_list_widget = QListWidget()
+        self.layout.addWidget(self.employee_list_widget)
+        self.mongo_uri = os.getenv('MONGO_URI')
         self.setLayout(self.layout)
 
-        self.populate_employer_list()
+        self.populate_employee_list()
 
-    def populate_employer_list(self):
+    def populate_employee_list(self):
+        # Connect to MongoDB and get the list of employees
         client = MongoClient(self.mongo_uri)
         db = client['user']
-        users_collection = db['users']
-        employers = users_collection.find({"role": "employer"})
+        employees_collection = db['users']
+        employees = employees_collection.find({"role": "employer"})
 
-        for employer in employers:
-            item = QListWidgetItem(employer["username"])
-            self.csv_list_widget.addItem(item)
+        # Add employees to the list widget
+        for employee in employees:
+            name = employee["username"]
+            item = QListWidgetItem(name)
+            self.employee_list_widget.addItem(item)
 
-    def assign_link_to_employer(self):
-        selected_items = self.csv_list_widget.selectedItems()
-        if not selected_items:
-            QMessageBox.warning(self, "Error", "Please select an employer.")
-            return
+            # Add a button to upload folder for each employee
+            upload_btn = QPushButton("Upload Folder")
+            upload_btn.clicked.connect(lambda checked, name=name: self.upload_folder(name))
+            self.employee_list_widget.setItemWidget(item, upload_btn)
 
-        employer_username = selected_items[0].text()
-        shareable_link = self.link_input.text()
-
-        if not shareable_link:
-            QMessageBox.warning(self, "Error", "Please enter a shareable link.")
-            return
-
-        client = MongoClient(self.mongo_uri)
-        db = client['user']
-        users_collection = db['users']
-        users_collection.update_one({'username': employer_username}, {"$set": {'shareable_link': shareable_link}})
-
-        QMessageBox.information(self, "Success", f"Link assigned to {employer_username}")
+    def upload_folder(self, username):
+        folder_path = QFileDialog.getExistingDirectory(self, f'Select Folder for {username}', "C:\\")
+        if folder_path:
+            # Save the assigned folder path to the database
+            client = MongoClient(self.mongo_uri)
+            db = client['user']
+            employees_collection = db['users']
+            employees_collection.update_one({'username': username}, {"$set": {'assigned_folder': folder_path}})
+            QMessageBox.information(self, "Success", f"Folder assigned to {username}")
 
 class FolderUploadDialog(QDialog):
     def __init__(self):
@@ -454,40 +442,42 @@ class LabelsTool(QDialog):
     
     def choose_excel_folder(self):
         if self.dataset is None:
-            QMessageBox.information(self, "Warn", "You should click to \"Select Dir\" button to choose image dir")
-            return
-
-        if self.role == "employer":
-            shareable_link = self.get_assigned_link()
-            if not shareable_link:
-                QMessageBox.information(self, "Error", "No link assigned. Please contact the admin.")
-                return
-            self.csv_path = self.download_file_from_link(shareable_link)
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setText("You should click to \"Select Dir\" button to choose image dir")
+            msg.setWindowTitle("Warn")
+            msg.exec()
         else:
-            self.csv_folder = QFileDialog.getExistingDirectory(self, 'Open Folder', "C:\\")
+            if self.role == "employer":
+                self.csv_folder = self.get_assigned_save_folder()
+                if not self.csv_folder or not os.path.exists(self.csv_folder):
+                    QMessageBox.information(self, "No Save Folder Assigned", "No save folder has been assigned to you yet. Please contact the admin.")
+                    return
+            else:
+                self.csv_folder = QFileDialog.getExistingDirectory(self, 'Open Folder', "C:\\")
+            
             self.csv_path = os.path.join(self.csv_folder, "label_image.csv")
+            
+            if not(os.path.exists(self.csv_path)):
+                self.csv_file = pd.DataFrame()
+                self.csv_file["Name"] = pd.Series(self.dataset)
+                self.csv_file["Rating"] = pd.Series([])
+                self.csv_file.to_csv(self.csv_path, index=False)
+            else:
+                self.csv_file = pd.read_csv(self.csv_path)
+            
+            # Đọc nội dung của file CSV
+            with open(self.csv_path, 'r') as file:
+                csv_content = file.read()
 
-        if not os.path.exists(self.csv_path):
-            self.csv_file = pd.DataFrame()
-            self.csv_file["Name"] = pd.Series(self.dataset)
-            self.csv_file["Rating"] = pd.Series([])
-            self.csv_file.to_csv(self.csv_path, index=False)
-        else:
-            self.csv_file = pd.read_csv(self.csv_path)
-        self.show_image(self.index, self.resized_mode, self.convert_mode)
-
-    def get_assigned_link(self):
-        client = MongoClient(self.mongo_uri)
-        db = client['user']
-        user = db['users'].find_one({'username': self.username})
-        return user.get('shareable_link')
-
-    def download_file_from_link(self, link):
-        response = requests.get(link)
-        file_path = os.path.join('downloads', 'assigned_file.csv')
-        with open(file_path, 'wb') as file:
-            file.write(response.content)
-        return file_path
+            # Lưu nội dung của file CSV vào cơ sở dữ liệu
+            client = MongoClient(self.mongo_uri)
+            db = client['user']
+            users_collection = db['users']
+            users_collection.update_one({'username': self.username}, {"$set": {'csv_content': csv_content}})
+            QMessageBox.information(self, "Success", f"CSV content saved for {self.username}")
+                
+            self.show_image(self.index, self.resized_mode, self.convert_mode)
         
     def change_view_mode(self):
         if self.index == -1:
