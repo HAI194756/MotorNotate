@@ -321,6 +321,545 @@ class AdminViewCsvDialog(QDialog):
         # Hiển thị hộp thoại
         csv_content_dialog.exec()
 
+class AssignFolderDialog(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Assign Folder to Employer")
+        self.setGeometry(200, 200, 400, 300)
+
+        self.layout = QVBoxLayout()
+        self.employee_list_widget = QListWidget()
+        self.layout.addWidget(self.employee_list_widget)
+        self.mongo_uri = os.getenv('MONGO_URI')
+        self.setLayout(self.layout)
+
+        self.populate_employee_list()
+
+    def populate_employee_list(self):
+        # Connect to MongoDB and get the list of employees
+        client = MongoClient(self.mongo_uri)
+        db = client['user']
+        employees_collection = db['users']
+        employees = employees_collection.find({"role": "employer"})
+
+        # Add employees to the list widget
+        for employee in employees:
+            name = employee["username"]
+            item = QListWidgetItem(name)
+            self.employee_list_widget.addItem(item)
+
+            # Add a button to upload folder for each employee
+            upload_btn = QPushButton("Upload Folder")
+            upload_btn.clicked.connect(lambda checked, name=name: self.upload_folder(name))
+            self.employee_list_widget.setItemWidget(item, upload_btn)
+
+    def upload_folder(self, username):
+        folder_path = QFileDialog.getExistingDirectory(self, f'Select Folder for {username}', "C:\\")
+        if folder_path:
+            # Save the assigned folder path to the database
+            client = MongoClient(self.mongo_uri)
+            db = client['user']
+            employees_collection = db['users']
+            employees_collection.update_one({'username': username}, {"$set": {'assigned_folder': folder_path}})
+            QMessageBox.information(self, "Success", f"Folder assigned to {username}")
+
+class FolderUploadDialog(QDialog):
+    def __init__(self):
+        super(FolderUploadDialog, self).__init__()
+        self.setWindowTitle("Upload Folder")
+        self.setGeometry(100, 100, 400, 200)
+        
+        self.layout = QVBoxLayout()
+        
+        self.upload_btn = QPushButton("Upload Folder")
+        self.upload_btn.clicked.connect(self.upload_folder)
+        self.layout.addWidget(self.upload_btn)
+        
+        self.assign_btn = QPushButton("Assign to...")
+        self.assign_btn.clicked.connect(self.open_assign_folder_dialog)
+        self.layout.addWidget(self.assign_btn)
+        
+        self.ok_btn = QPushButton("OK")
+        self.ok_btn.clicked.connect(self.accept)
+        self.layout.addWidget(self.ok_btn)
+        
+        self.setLayout(self.layout)
+        self.folder_path = None
+    
+    def upload_folder(self):
+        self.folder_path = QFileDialog.getExistingDirectory(self, 'Select Folder', "C:\\")
+        if self.folder_path:
+            self.upload_btn.setText("Folder Selected")
+
+    def open_assign_folder_dialog(self):
+        assign_folder_dialog = AssignFolderDialog()
+        assign_folder_dialog.exec()
+
+    def get_folder_path(self):
+        return self.folder_path
+
+class LabelsTool(QDialog):
+    def __init__(self, username, role):
+        super(LabelsTool, self).__init__()
+
+        self.setFixedSize(1000, 800)
+        
+        self.dataset = None 
+        self.excel_path = None
+        self.csv_file = None
+        self.resized_mode = False
+        self.convert_mode = False
+        self.index = -1
+        
+        self.initDialog()
+        self.initKeyBoard()
+        
+        self.setupButton()
+        self.retranslateUi()
+
+        self.mongo_uri = os.getenv('MONGO_URI')
+        self.username = username
+        self.role = role
+
+    def closeEvent(self, event):
+        client = MongoClient(self.mongo_uri)
+        db = client['user']
+        users_collection = db['users']
+        users_collection.update_one({'username': self.username}, {"$set": {'status': 'off'}})
+        event.accept()
+
+    def main_menu(self):
+        self.new_window = MainMenu(self.username, self.role)  
+        self.close() 
+        self.new_window.show()  
+        
+    def get_assigned_save_folder(self):
+        client = MongoClient(self.mongo_uri)
+        db = client['user']
+        users_collection = db['users']
+        user = users_collection.find_one({'username': self.username})
+        return user.get('assigned_folder')
+    
+    def choose_excel_folder(self):
+        if self.dataset is None:
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setText("You should click to \"Select Dir\" button to choose image dir")
+            msg.setWindowTitle("Warn")
+            msg.exec()
+        else:
+            if self.role == "employer":
+                self.csv_folder = self.get_assigned_save_folder()
+                if not self.csv_folder or not os.path.exists(self.csv_folder):
+                    QMessageBox.information(self, "No Save Folder Assigned", "No save folder has been assigned to you yet. Please contact the admin.")
+                    return
+            else:
+                self.csv_folder = QFileDialog.getExistingDirectory(self, 'Open Folder', "C:\\")
+            
+            self.csv_path = os.path.join(self.csv_folder, "label_image.csv")
+            
+            if not(os.path.exists(self.csv_path)):
+                self.csv_file = pd.DataFrame()
+                self.csv_file["Name"] = pd.Series(self.dataset)
+                self.csv_file["Rating"] = pd.Series([])
+                self.csv_file.to_csv(self.csv_path, index=False)
+            else:
+                self.csv_file = pd.read_csv(self.csv_path)
+            
+            # Đọc nội dung của file CSV
+            with open(self.csv_path, 'r') as file:
+                csv_content = file.read()
+
+            # Lưu nội dung của file CSV vào cơ sở dữ liệu
+            client = MongoClient(self.mongo_uri)
+            db = client['user']
+            users_collection = db['users']
+            users_collection.update_one({'username': self.username}, {"$set": {'csv_content': csv_content}})
+            QMessageBox.information(self, "Success", f"CSV content saved for {self.username}")
+                
+            self.show_image(self.index, self.resized_mode, self.convert_mode)
+
+    def save_csv_content_to_db(self):
+        if self.csv_path and self.username:
+            # Đọc nội dung của file CSV
+            with open(self.csv_path, 'r') as file:
+                csv_content = file.read()
+
+            # Lưu nội dung của file CSV vào cơ sở dữ liệu
+            client = MongoClient(self.mongo_uri)
+            db = client['user']
+            users_collection = db['users']
+            users_collection.update_one({'username': self.username}, {"$set": {'csv_content': csv_content}})
+            QMessageBox.information(self, "Success", f"CSV content saved for {self.username}")
+
+
+    def read_csv_from_folder(self, folder_path):
+        csv_path = os.path.join(folder_path, "label_image.csv")
+        if os.path.exists(csv_path):
+            df = pd.read_csv(csv_path)
+            return df
+        else:
+            print(f"CSV file 'label_image.csv' not found in folder '{folder_path}'")
+        return None
+
+    def load_image_dir_func(self):
+        if self.role == "admin":
+            self.open_folder_upload_dialog()
+        else:
+            client = MongoClient(self.mongo_uri)
+            db = client['user']
+            users_collection = db['users']
+            user = users_collection.find_one({'username': self.username})
+            self.fname = user.get('assigned_folder')
+            
+            if self.fname and os.path.exists(self.fname):
+                self.dataset = os.listdir(self.fname)
+                self.index = 0
+                self.show_image(self.index, self.resized_mode, self.convert_mode)
+                self.total_image_label.setText("/" + str(len(self.dataset)))
+            else:
+                QMessageBox.information(self, "No Folder Assigned", "No folder has been assigned to you yet. Please contact the admin.")
+
+    def open_folder_upload_dialog(self):
+        dialog = FolderUploadDialog()
+        if dialog.exec():
+            self.fname = dialog.get_folder_path()
+            if self.fname and os.path.exists(self.fname):
+                self.dataset = os.listdir(self.fname)
+                self.index = 0
+                self.show_image(self.index, self.resized_mode, self.convert_mode)
+                self.total_image_label.setText("/" + str(len(self.dataset)))
+        
+    def show_image(self, index):
+        name = self.dataset[index]
+        print(name, self.fname)
+        # current_image = cv2.imread(os.path.join(self.fname, name))
+
+        # Resolve unicode path problem
+        stream = open(u"{}".format(os.path.join(self.fname, name)), "rb")
+        bytes = bytearray(stream.read())
+        np_array = np.asarray(bytes, dtype=np.uint8)
+        current_image = cv2.imdecode(np_array, cv2.IMREAD_UNCHANGED)
+        
+        image = QImage(current_image, current_image.shape[1], current_image.shape[0], current_image.shape[1] * 3, QImage.Format.Format_RGB888)
+        pixmap = QPixmap(image)
+        
+        width, height = self.showscreen.width(), self.showscreen.height()
+        pixmap = pixmap.scaled(width, height, Qt.AspectRatioMode.KeepAspectRatio)
+         
+        self.showscreen.setPixmap(pixmap)
+        
+        
+        # Hiển thị rating đã label (nếu có)
+        rating_label = self.get_image_rating(name)
+        
+        if rating_label != -1:
+            self.result.setText(str(rating_label))
+            self.label = rating_label
+        else:
+            self.result.setText("")
+            self.label = -1
+            
+        # Update the index in image_index
+        self.update_index_label(self.index)
+        
+    def get_image_rating(self, name):
+        if self.csv_file is None:
+            return -1
+        
+        record = self.csv_file[self.csv_file.Name == name].to_numpy()
+        
+        if len(record) == 0:
+            return -1 
+        else:
+            record = record[0]
+            
+            try:
+                int(record[1]) 
+            except:
+                return -1
+            else:
+                return int(record[1]) 
+        
+    def listen_key(self, event):
+        key_press = event.key()
+        
+        if key_press == Qt.Key.Key_1:
+            return 1 #xe_so
+        elif key_press == Qt.Key.Key_2:
+            return 2 #xe_ga
+        elif key_press == Qt.Key.Key_3:
+            return 3 #xe_dien 
+        elif key_press == Qt.Key.Key_4:
+            return 4 #phan_khoi_lon
+        elif key_press == Qt.Key.Key_5:
+            return 5 #ko_phai_xe_may
+    def keyPressEvent(self, event):
+        label = self.listen_key(event)
+        
+        if label is not None or label == -1:
+            self.label = label 
+            self.display_result(self.label)
+            
+    def display_result(self, rating):
+        if rating is not None or rating == -1:
+            self.result.setText(str(rating))
+    
+    # Cần đoạn code này do event ở key press không nhận các dấu mũi tên
+    def initKeyBoard(self):
+        # Next or previous image
+        self.right = QShortcut(QKeySequence("Right"), self)
+        self.right.activated.connect(self.go_next_image)
+        
+        self.left = QShortcut(QKeySequence("Left"), self)
+        self.left.activated.connect(self.go_prev_image)
+        
+    def show_notification_pop_up(self, content, title):
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(content)
+        msg.setWindowTitle(title)
+        msg.exec()
+    
+    def auto_save_label(self, name, rating):
+        index = self.csv_file[self.csv_file.Name == name].index
+        index = list(index)
+
+        if len(index) <= 0:
+            new_record = pd.DataFrame.from_dict({
+                "Name": [name],
+                "Rating": [rating]
+            })
+
+            self.csv_file = pd.concat([self.csv_file, new_record], axis=0)
+        else:
+        
+            index = list(index)[0]
+            
+            self.csv_file.iat[index, 1] = int(rating)
+        
+    def save_csv(self):
+        
+        if self.csv_file is not None and self.csv_path is not None:
+            self.csv_file.to_csv(self.csv_path, index=False)
+            
+            self.show_notification_pop_up("Save successfully", "Sucess")
+        
+    # Save file when closing app 
+    def closeEvent(self, event):
+        if self.csv_file is not None and self.csv_path is not None:
+            self.csv_file.to_csv(self.csv_path, index=False)
+            print("Auto save when closing")
+    
+    def go_next_image(self):
+        print("Next image")
+        
+        if self.index == -1:
+            self.show_notification_pop_up("You must select image dir by clicking to \"Select Dir\" button ", "Warn")
+            return
+        
+        if self.csv_file is None:
+            self.show_notification_pop_up("You must select image dir by clicking to \"Select Save Dir\" button ", "Warn")
+            return 
+        
+        if self.label is None or self.label == -1:
+            self.show_notification_pop_up("You must label image", "Warn")
+            return 
+        
+        if self.index >= len(self.dataset) - 1:
+            self.show_notification_pop_up("You have labeled all images", "Success")
+            
+            name = self.dataset[self.index]
+            self.auto_save_label(name, self.label)
+            
+            if self.csv_file is not None and self.csv_path is not None:
+                self.csv_file.to_csv(self.csv_path, index=False)
+            return 
+            
+        name = self.dataset[self.index]
+        self.auto_save_label(name, self.label)
+            
+        self.index += 1
+        self.show_image(self.index, self.resized_mode, self.convert_mode)      
+        
+    def go_prev_image(self):
+        print("Previous image")
+        
+        if self.index == -1:
+            self.show_notification_pop_up("You must select image dir by clicking to \"Select Dir\" button ", "Warn")
+            return 
+        
+        if self.csv_file is None:
+            self.show_notification_pop_up("You must select image dir by clicking to \"Select Save Dir\" button ", "Warn")
+            return 
+        
+        if self.label is None or self.label == -1:
+            self.show_notification_pop_up("You must label image", "Warn")
+            return 
+        
+        if self.index <= 0:
+            self.show_notification_pop_up("There are no previous image", "Warn")
+            return 
+            
+        name = self.dataset[self.index]
+        self.auto_save_label(name, self.label)
+            
+        self.index -= 1
+        self.show_image(self.index, self.resized_mode, self.convert_mode)
+    
+    def update_index_label(self, index):
+        self.image_index.setText("{}".format(index + 1))
+        
+    def go_to_image(self):
+        image_index = int(self.image_index.text())
+        
+        if image_index >= len(self.dataset) or image_index <= 0:
+            self.show_notification_pop_up("Invalid index", "Warning")
+        else:
+            name = self.dataset[self.index]
+            self.auto_save_label(name, self.label)
+            
+            self.index = image_index - 1
+            self.show_image(self.index, self.resized_mode, self.convert_mode)
+            
+        
+    def initDialog(self):
+        # Icon
+        icon = QIcon()
+        icon.addPixmap(QPixmap("icon.jpg"), QIcon.Mode.Disabled)
+        self.setWindowIcon(icon)
+
+        # Screen Static
+        self.screenStatic = QWidget(self)
+        self.screenStatic.setGeometry(QRect(-1, -1, 1001, 801))
+        self.screenStatic.setStyleSheet("QWidget#screenStatic{background-image: url(\"new2.jpg\");}")
+        self.screenStatic.setObjectName("screenStatic")
+
+        # Show image for labeling 
+        self.showscreen = QLabel(self.screenStatic)
+        self.showscreen.setGeometry(QRect(360, 120, 621, 651))
+        self.showscreen.setStyleSheet("border-radius: 20px;\n""border-width: 10px;\n"
+                                      "border-color: white;\n""background-color: rgba(255, 255, 255, 70);") # 170, 255, 255
+        self.showscreen.setFrameShape(QFrame.Shape.Panel)
+        self.showscreen.setFrameShadow(QFrame.Shadow.Sunken)
+        self.showscreen.setText("")
+        self.showscreen.setTextFormat(Qt.TextFormat.PlainText)
+        self.showscreen.setPixmap(QPixmap("../../../../../../"))
+        self.showscreen.setScaledContents(False)
+        self.showscreen.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.showscreen.setObjectName("showscreen")
+
+        # Welcome to LabelsTool label
+        self.welcome2 = QLabel(self.screenStatic)
+        self.welcome2.setGeometry(QRect(430, 60, 511, 51))
+        self.welcome2.setStyleSheet("font: 75 18pt \"MS Shell Dlg 2\";\n""color: rgb(255, 255, 255);")
+        self.welcome2.setObjectName("welcome2")
+
+        # Directory selection button
+        self.dir_selection_btn = QPushButton(self.screenStatic)
+        self.dir_selection_btn.setGeometry(QRect(60, 120, 211, 51))
+        self.dir_selection_btn.setStyleSheet("border-radius: 20px;\n""font: 75 16pt \"MS Shell Dlg 2\";\n"
+                                      "background-color: rgb(85, 255, 255);\n""color: #000000;")
+        self.dir_selection_btn.setObjectName("dir_selection")
+
+        # Save xlsx dir selection
+        self.save_dir_btn = QPushButton(self.screenStatic)
+        self.save_dir_btn.setGeometry(QRect(60, 190, 211, 51))
+        self.save_dir_btn.setStyleSheet("border-radius: 20px;\n""font: 75 16pt \"MS Shell Dlg 2\";\n"
+                                      "background-color: rgb(85, 255, 255);\n""color: #000000;")
+        self.save_dir_btn.setObjectName("save_dir_btn")
+        
+        # Manual save button 
+        self.manual_save_btn = QPushButton(self.screenStatic)
+        self.manual_save_btn.setGeometry(QRect(60, 260, 211, 51))
+        self.manual_save_btn.setStyleSheet("border-radius: 20px;\n""font: 75 16pt \"MS Shell Dlg 2\";\n"
+                                      "background-color: rgb(85, 255, 255);\n""color: #000000;")
+        self.manual_save_btn.setObjectName("manual_save_btn")
+
+        # Back to Menu
+        self.main_menu_btn = QPushButton(self.screenStatic)
+        self.main_menu_btn.setGeometry(QRect(60, 330, 211, 51))
+        self.main_menu_btn.setStyleSheet("border-radius: 20px;\n""font: 75 16pt \"MS Shell Dlg 2\";\n"
+                                      "background-color: rgb(85, 255, 255);\n""color: #000000;")
+        self.main_menu_btn.setObjectName("main_menu")
+        
+        # Image number label
+        self.image_number_label = QLabel(self.screenStatic)
+        self.image_number_label.setGeometry(QRect(70, 450, 191, 50))
+        self.image_number_label.setStyleSheet("font: 75 18pt \"MS Shell Dlg 2\";\n""color: rgb(255, 255, 255);")
+        self.image_number_label.setObjectName("welcome2")
+        
+        # Show the image number 
+        self.image_index = QLineEdit(self.screenStatic)
+        self.image_index.setGeometry(QRect(540, 60, 150, 50))
+        self.image_index.setStyleSheet("border-radius: 20px;\n"
+                                  "border-width:8px;\n"
+                                  "border-color: black;\n"
+                                  "background-color: rgb(255, 255, 255);\n"
+                                  "font: 75 14pt 'MS Shell Dlg 2';\n"
+                                  "color: rgb(0, 0, 0);")
+        self.image_index.setText("")
+        self.image_index.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_index.setObjectName("image_index")
+        
+        # Show the total number image 
+        self.total_image_label = QLabel(self.screenStatic)
+        self.total_image_label.setGeometry(QRect(700, 60, 200, 50)) 
+        self.total_image_label.setStyleSheet("font: 75 18pt \"MS Shell Dlg 2\";\n""color: rgb(0, 0, 0);")
+        self.total_image_label.setObjectName("welcome2")
+        
+        # Go to button 
+        self.change_image_btn = QPushButton(self.screenStatic)
+        self.change_image_btn.setGeometry(QRect(910, 60, 50, 50))
+        self.change_image_btn.setStyleSheet("border-radius: 20px;\n""font: 75 16pt \"MS Shell Dlg 2\";\n"
+                                      "background-color: rgb(255, 255, 255);\n""color: #000000;")
+        self.change_image_btn.setObjectName("save_dir_btn")
+        
+        # Result 
+        self.result_label = QLabel(self.screenStatic)
+        self.result_label.setGeometry(QRect(70, 550, 191, 50))
+        self.result_label.setStyleSheet("font: 75 18pt \"MS Shell Dlg 2\";\n""color: rgb(255, 255, 255);")
+        self.result_label.setObjectName("welcome2")
+        
+        # Show click
+        self.result = QLabel(self.screenStatic)
+        self.result.setGeometry(QRect(70, 600, 191, 161))
+        self.result.setStyleSheet("border-radius: 20px;\n"
+                                  "border-width:5px;\n"
+                                  "border-color: white;\n"
+                                  "background-color: rgb(170, 255, 255);\n"
+                                  "font: 75 18pt 'MS Shell Dlg 2';\n"
+                                  "color: rgb(0, 0, 0);")
+        self.result.setText("")
+        self.result.setTextFormat(Qt.TextFormat.PlainText)
+        self.result.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.result.setObjectName("result")
+        
+    def retranslateUi(self):
+        _translate = QCoreApplication.translate
+        self.setWindowTitle(_translate("Dialog", "LabelNow"))
+        # Welcome to LabelsTool image
+        self.welcome2.setText(_translate("Dialog", "Image:"))
+        # Chọn đường dẫn đến folder chứa ảnh cần gán nhãn
+        self.dir_selection_btn.setText(_translate("Dialog", "Select Dir"))
+        # Chọn đường dẫn chứa file csv gán nhãn
+        self.save_dir_btn.setText(_translate("Dialog", "Select Save Dir"))
+        # Label result 
+        self.result_label.setText(_translate("Dialog", "Result:"))
+        # Manual save 
+        self.manual_save_btn.setText(_translate("Dialog", "Save All Label"))
+        # Go direct to image 
+        self.change_image_btn.setText(_translate("Dialog", "Go"))
+        #Back to menu
+        self.main_menu_btn.setText(_translate("Dialog", "Back"))
+        
+    def setupButton(self):
+        self.dir_selection_btn.clicked.connect(self.load_image_dir_func)
+        self.save_dir_btn.clicked.connect(self.choose_excel_folder)
+        self.manual_save_btn.clicked.connect(self.save_csv)
+        self.change_image_btn.clicked.connect(self.go_to_image)
+        self.main_menu_btn.clicked.connect(self.main_menu)
+
 class Detect(QWidget):
     def __init__(self, username, role):
         super().__init__()
