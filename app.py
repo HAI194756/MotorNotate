@@ -7,13 +7,29 @@ import os
 import cv2
 import pandas as pd
 import numpy as np
+import re
+import webbrowser
+import csv
 import matplotlib.pyplot as plt
+import torch
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from io import StringIO
 from pymongo import MongoClient
+from pydrive.auth import GoogleAuth
+from pydrive.drive import GoogleDrive
+from ultralytics import YOLO
+from torchvision import transforms
+from PIL import Image
 
 class LoginForm(QWidget):
     def __init__(self):
         super().__init__()
+
+        # Icon
+        icon = QIcon()
+        icon.addPixmap(QPixmap("icon.jpg"), QIcon.Mode.Disabled)
+        self.setWindowIcon(icon)
+
         layout = QGridLayout()
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
@@ -92,6 +108,12 @@ class LoginForm(QWidget):
 class RegisterForm(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        # Icon
+        icon = QIcon()
+        icon.addPixmap(QPixmap("icon.jpg"), QIcon.Mode.Disabled)
+        self.setWindowIcon(icon)
+
         layout = QGridLayout()
         layout.setContentsMargins(40, 40, 40, 40)
         layout.setSpacing(10)
@@ -147,8 +169,16 @@ class RegisterForm(QWidget):
 class MainMenu(QWidget):
     def __init__(self, username, role):
         super().__init__()
+
+        # Icon
+        icon = QIcon()
+        icon.addPixmap(QPixmap("icon.jpg"), QIcon.Mode.Disabled)
+        self.setWindowIcon(icon)
+
         self.setWindowTitle("Welcome Page")
         self.resize(600, 300)
+        self.role = role
+        self.username = username
         
         layout = QGridLayout()
 
@@ -167,7 +197,7 @@ class MainMenu(QWidget):
         layout.addWidget(button1, 1, 1, Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignCenter)
         button1.clicked.connect(self.label_tool)
 
-        button2 = QPushButton("Motor detection")
+        button2 = QPushButton("Detector")
         button2.setFixedSize(100, 50)
         layout.addWidget(button2, 2, 1, Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignCenter)
         button2.clicked.connect(self.detect_tool)
@@ -179,18 +209,29 @@ class MainMenu(QWidget):
 
         # Thêm nút Show Employers nếu role là admin
         if role == "admin":
-            show_employers_button = QPushButton("Show Employers")
+            show_employers_button = QPushButton("Show Members")
             show_employers_button.setFixedSize(150, 50)
             show_employers_button.clicked.connect(self.show_employers)
             layout.addWidget(show_employers_button, 0, 2, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
 
-            view_csv_button = QPushButton("View Employer CSV Files")
+            view_csv_button = QPushButton("View Member Progress")
             view_csv_button.setFixedSize(150, 50)
             view_csv_button.clicked.connect(self.open_admin_view_csv_dialog)
             layout.addWidget(view_csv_button, 1, 2, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
-
-        self.role = role
-        self.username = username
+        else:
+            self.client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
+            self.db = self.client['user']
+            self.users_collection = self.db['users']
+            user = self.users_collection.find_one({"username" : username})
+            assigned_link = user.get("assigned_folder", "")
+        
+            if assigned_link:
+                label = QLabel("!You have been assigned a folder from admin", self)
+                layout.addWidget(label, 0, 0, 2, 3, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+            else:
+                label1 = QLabel("!You have not been assigned any folder from admin", self)
+                layout.addWidget(label1, 0, 0, 2, 3, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+        
         self.setLayout(layout)
 
     def logout(self, username):
@@ -232,12 +273,18 @@ class MainMenu(QWidget):
         self.employer_window.exec()
 
     def open_admin_view_csv_dialog(self):
-        dialog = AdminViewCsvDialog()
+        dialog = AdminViewCsvDialog(self.username)
         dialog.exec()
 
 class EmployerListDialog(QDialog):
     def __init__(self):
         super().__init__()
+
+        # Icon
+        icon = QIcon()
+        icon.addPixmap(QPixmap("icon.jpg"), QIcon.Mode.Disabled)
+        self.setWindowIcon(icon)
+
         self.setWindowTitle("List of Employers")
         self.setFixedSize(400, 300)
         
@@ -266,65 +313,156 @@ class EmployerListDialog(QDialog):
         QMessageBox.information(self, "Promotion Successful", f"{username} has been promoted to Admin.")
 
 class AdminViewCsvDialog(QDialog):
-    def __init__(self):
+    def __init__(self, username):
         super().__init__()
+
+        # Icon
+        icon = QIcon()
+        icon.addPixmap(QPixmap("icon.jpg"), QIcon.Mode.Disabled)
+        self.setWindowIcon(icon)
+
         self.setWindowTitle("View CSV")
         self.setFixedSize(400, 300)
-        
-        layout = QVBoxLayout()
+
+        # Layout chính
+        main_layout = QVBoxLayout()
+
+        # Checkbox để chuyển đổi chế độ hiển thị
+        self.switch_checkbox = QCheckBox("Show only users with CSV content")
+        self.switch_checkbox.stateChanged.connect(self.update_user_list)
+        main_layout.addWidget(self.switch_checkbox)
+
+        # Placeholder cho danh sách user
+        self.user_layouts = QVBoxLayout()
+        main_layout.addLayout(self.user_layouts)
+
+        self.setLayout(main_layout)
 
         self.client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
         self.db = self.client['user']
         self.users_collection = self.db['users']
-        
+
+        self.update_user_list()
+
+    def clear_layout(self, layout):
+        while layout.count():
+            child = layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+            elif child.layout():
+                self.clear_layout(child.layout())
+
+    def update_user_list(self):
+        # Clear the previous user list
+        self.clear_layout(self.user_layouts)
+
+        show_only_with_csv = self.switch_checkbox.isChecked()
         employers = self.users_collection.find({'role': 'employer'})
+
         for employer in employers:
+            csv_content = employer.get("csv_content", "")
+            if show_only_with_csv and not csv_content:
+                continue
+
             h_layout = QHBoxLayout()
             label = QLabel(f"Username: {employer['username']}")
             h_layout.addWidget(label)
 
+            if csv_content:
+                # Chuyển đổi nội dung CSV thành DataFrame
+                df = pd.read_csv(StringIO(csv_content))
+
+                # Tính toán số dòng đã được rating và tổng số dòng
+                total_rows = len(df)
+                rated_rows = df['Rating'].count()
+                stats = f"Labeled Image: {rated_rows} / {total_rows}"
+            else:
+                stats = "No CSV content available."
+
+            # Thêm thống kê vào hộp thoại
+            stats_label = QLabel(stats)
+            h_layout.addWidget(stats_label)
+
             button = QPushButton("View CSV")
             button.clicked.connect(lambda _, username=employer['username']: self.view_csv(username))
             h_layout.addWidget(button)
-            
-            layout.addLayout(h_layout)
-        
-        self.setLayout(layout)
+
+            self.user_layouts.addLayout(h_layout)
 
     def view_csv(self, username):
         client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
         db = client['user']
         users_collection = db['users']
         user = users_collection.find_one({"username": username})
-        csv_content = user.get("csv_content", "")
-
-        if csv_content:
-            # Chuyển đổi nội dung CSV thành DataFrame
-            from io import StringIO
-            df = pd.read_csv(StringIO(csv_content))
-            
-            # Tính toán số dòng đã được rating và tổng số dòng
-            total_rows = len(df)
-            rated_rows = df['Rating'].count()
-            stats = f"Labeled Image: {rated_rows} / Total Image: {total_rows}"
-        else:
-            stats = "No CSV content available."
-        
+        assigned_folder = user.get("assigned_folder", "")
+        assigns = self.users_collection.find({'assigned_folder': assigned_folder})
+    
         # Tạo một hộp thoại để hiển thị nội dung của trường csv_content
         csv_content_dialog = QDialog(self)
         csv_content_dialog.setWindowTitle(f"CSV Content for {username}")
         csv_content_dialog.setGeometry(400, 400, 600, 400)
-
         layout = QVBoxLayout()
+
+        # Thêm QLabel để hiển thị assigned_folder
+        folder_label = QLabel(f"Assigned Folder: {assigned_folder}")
+        layout.addWidget(folder_label)
+
+        combined_df = pd.DataFrame()
+        usernames = []
+
+        for assign in assigns:
+            content = assign.get("csv_content", "")
+            if content:
+                temp_df = pd.read_csv(StringIO(content))
+                usernames.append(assign['username'])
+                temp_df.rename(columns={'Rating': assign['username']}, inplace=True)
+                if combined_df.empty:
+                    combined_df = temp_df
+                else:
+                    combined_df = pd.merge(combined_df, temp_df, on='Name', how='outer')
+
+        # Combine the ratings
+        if not combined_df.empty:
+            combined_df['Rating'] = combined_df.apply(
+                lambda row: '/'.join([str(row[col]) for col in combined_df.columns if col != 'Name' and not pd.isna(row[col])]), axis=1
+            )
+            combined_df = combined_df[['Name', 'Rating']]
+    
+        # Tính toán số lượng ảnh đã được đánh giá bởi ít nhất một user
+        rated_images = combined_df['Rating'].apply(lambda x: any(rating != '' for rating in x.split('/'))).sum()
+
+        # Tính toán số lượng ảnh có rating khác nhau giữa các user
+        def different_ratings(rating):
+            ratings = set(rating.split('/'))
+            return len(ratings) > 1
+
+        different_ratings_count = combined_df['Rating'].apply(different_ratings).sum()
+
+        # Hiển thị số lượng ảnh đã được đánh giá
+        rated_images_label = QLabel(f"Rated Images: {rated_images}")
+        layout.addWidget(rated_images_label)
+
+        # Hiển thị số lượng ảnh có rating khác nhau
+        different_ratings_label = QLabel(f"Images with different ratings by users: {different_ratings_count}")
+        layout.addWidget(different_ratings_label)
+
+        # Convert combined DataFrame to HTML with custom styling
+        def style_row(row):
+            rating = row['Rating']
+            if different_ratings(rating):
+                return ['background-color: red'] * len(row)
+            return [''] * len(row)
+
+        styled_df = combined_df.style.apply(style_row, axis=1)
+        styled_html = styled_df.to_html()
         
-        # Thêm thống kê vào hộp thoại
-        stats_label = QLabel(stats)
-        layout.addWidget(stats_label)
-        
-        text_edit = QTextEdit()
-        text_edit.setPlainText(csv_content)
-        layout.addWidget(text_edit)
-        
+        # Add usernames as a header
+        usernames_header = '/'.join(usernames) + '<br>'
+
+        text = QTextEdit()
+        text.setHtml(usernames_header + styled_html)
+        layout.addWidget(text)
+
         csv_content_dialog.setLayout(layout)
 
         # Hiển thị hộp thoại
@@ -333,12 +471,16 @@ class AdminViewCsvDialog(QDialog):
 class AssignFolderDialog(QDialog):
     def __init__(self):
         super().__init__()
+
+        # Icon
+        icon = QIcon()
+        icon.addPixmap(QPixmap("icon.jpg"), QIcon.Mode.Disabled)
+        self.setWindowIcon(icon)
+
         self.setWindowTitle("Assign Link to Employer")
         self.setGeometry(200, 200, 400, 300)
 
         self.layout = QVBoxLayout()
-        self.employee_list_widget = QListWidget()
-        self.layout.addWidget(self.employee_list_widget)
         
         self.setLayout(self.layout)
 
@@ -353,28 +495,42 @@ class AssignFolderDialog(QDialog):
 
         # Add employees to the list widget
         for employee in employees:
-            name = employee["username"]
-            item = QListWidgetItem(name)
-            self.employee_list_widget.addItem(item)
+            h_layout = QHBoxLayout()
+            label = QLabel(f"Username: {employee['username']}")
+            h_layout.addWidget(label)
 
             # Add a button to assign a link for each employee
             assign_btn = QPushButton("Assign Link")
-            assign_btn.clicked.connect(lambda checked, name=name: self.assign_link(name))
-            self.employee_list_widget.setItemWidget(item, assign_btn)
+            assign_btn.clicked.connect(lambda checked, username = employee['username']: self.assign_link(username))
+            h_layout.addWidget(assign_btn)
+            
+            self.layout.addLayout(h_layout)
+        self.setLayout(self.layout)
 
     def assign_link(self, username):
-        link, ok = QInputDialog.getText(self, f'Assign Link to {username}', 'Enter the link:')
-        if ok and link:
-            # Save the assigned link to the database
-            client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
-            db = client['user']
-            employees_collection = db['users']
-            employees_collection.update_one({'username': username}, {"$set": {'assigned_folder': link}})
-            QMessageBox.information(self, "Success", f"Link assigned to {username}")
+        client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
+        db = client['user']
+        employees_collection = db['users']
+        user = employees_collection.find_one({'username': username})
+        
+        if not user.get('assigned_folder'):
+            link, ok = QInputDialog.getText(self, f'Assign Link to {username}', 'Enter the link:')
+            if ok and link:
+                # Save the assigned link to the database
+                employees_collection.update_one({'username': username}, {"$set": {'assigned_folder': link}})
+                QMessageBox.information(self, "Success", f"Link assigned to {username}")
+        else:
+            QMessageBox.information(self, "Already Assigned", f"User {username} already has an assigned link.")
 
 class FolderUploadDialog(QDialog):
     def __init__(self):
         super(FolderUploadDialog, self).__init__()
+
+        # Icon
+        icon = QIcon()
+        icon.addPixmap(QPixmap("icon.jpg"), QIcon.Mode.Disabled)
+        self.setWindowIcon(icon)
+
         self.setWindowTitle("Upload Folder")
         self.setGeometry(100, 100, 400, 200)
         
@@ -383,6 +539,10 @@ class FolderUploadDialog(QDialog):
         self.upload_btn = QPushButton("Upload Folder")
         self.upload_btn.clicked.connect(self.upload_folder)
         self.layout.addWidget(self.upload_btn)
+
+        self.upload_btn2 = QPushButton("Upload Folder to Google Drive")
+        self.upload_btn2.clicked.connect(self.upload_drive)
+        self.layout.addWidget(self.upload_btn2)
         
         self.assign_btn = QPushButton("Assign to...")
         self.assign_btn.clicked.connect(self.open_assign_folder_dialog)
@@ -395,10 +555,116 @@ class FolderUploadDialog(QDialog):
         self.setLayout(self.layout)
         self.folder_path = None
     
-    def upload_folder(self):
-        self.folder_path = QFileDialog.getExistingDirectory(self, 'Select Folder', "C:\\")
-        if self.folder_path:
-            self.upload_btn.setText("Folder Selected")
+    def authenticate(self):
+        gauth = GoogleAuth()
+        gauth.LoadCredentialsFile("credentials.json")
+
+        if gauth.credentials is None:
+            # Authenticate if they're not there
+            gauth.LocalWebserverAuth()
+        elif gauth.access_token_expired:
+            # Refresh them if expired
+            gauth.Refresh()
+        else:
+            # Initialize the saved creds
+            gauth.Authorize()
+        
+        gauth.SaveCredentialsFile("credentials.json")
+        return GoogleDrive(gauth)
+    
+    def upload_drive(self):
+        drive = self.authenticate()
+        
+        # Ask user if they want to upload a file or a folder
+        choice, ok = QInputDialog.getItem(self, "Upload Option", "Do you want to upload a file or a folder?", ["File", "Folder"], 0, False)
+        if not ok:
+            return
+
+        if choice == "File":
+            self.upload_file(drive)
+        elif choice == "Folder":
+            self.upload_folder(drive)
+    
+    def extract_drive_id(self, url):
+        match = re.search(r'drive/folders/([a-zA-Z0-9_-]+)', url)
+        if match:
+            return match.group(1)
+        else:
+            return None
+
+    def upload_file(self, drive):
+        file_path, _ = QFileDialog.getOpenFileName(self, 'Select File', "C:\\", "All Files (*)")
+        if file_path:
+            drive_folder_url, ok = QInputDialog.getText(self, 'Upload to Google Drive', 'Enter Google Drive Folder URL:')
+            if ok:
+                drive_folder_id = self.extract_drive_id(drive_folder_url)
+                if drive_folder_id:
+                    try:
+                        # Define file metadata and upload it
+                        file_metadata = {
+                            'title': os.path.basename(file_path),
+                            'parents': [{'id': drive_folder_id}]
+                        }
+                        gfile = drive.CreateFile(file_metadata)
+                        gfile.SetContentFile(file_path)
+                        gfile.Upload()
+                        QMessageBox.information(self, "Success", f"Uploaded: {file_path}")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+                else:
+                    QMessageBox.critical(self, "Error", "Invalid Google Drive Folder URL.")
+
+    def upload_folder(self, drive):
+        folder_path = QFileDialog.getExistingDirectory(self, 'Select Folder', "C:\\")
+        if folder_path:
+            drive_folder_url, ok = QInputDialog.getText(self, 'Upload to Google Drive', 'Enter Google Drive Folder URL:')
+            if ok:
+                drive_folder_id = self.extract_drive_id(drive_folder_url)
+                if drive_folder_id:
+                    try:
+                        folder_id_map = {folder_path: drive_folder_id}
+                        
+                        # Create a folder on Google Drive
+                        def create_drive_folder(folder_name, parent_id):
+                            folder_metadata = {
+                                'title': folder_name,
+                                'mimeType': 'application/vnd.google-apps.folder',
+                                'parents': [{'id': parent_id}] if parent_id else []
+                            }
+                            gfolder = drive.CreateFile(folder_metadata)
+                            gfolder.Upload()
+                            return gfolder['id']
+                        
+                        for root, dirs, files in os.walk(folder_path):
+                            for dir_name in dirs:
+                                dir_path = os.path.join(root, dir_name)
+                                parent_path = os.path.dirname(dir_path)
+                                parent_id = folder_id_map.get(parent_path, drive_folder_id)
+                                
+                                folder_id = create_drive_folder(dir_name, parent_id)
+                                folder_id_map[dir_path] = folder_id
+                                print(f"Created folder {dir_name} with ID {folder_id}")
+                        
+                        for root, dirs, files in os.walk(folder_path):
+                            for filename in files:
+                                file_path = os.path.join(root, filename)
+                                parent_path = os.path.dirname(file_path)
+                                parent_id = folder_id_map.get(parent_path, drive_folder_id)
+                                
+                                # Define file metadata and upload it
+                                file_metadata = {
+                                    'title': filename,
+                                    'parents': [{'id': parent_id}] if parent_id else []
+                                }
+                                gfile = drive.CreateFile(file_metadata)
+                                gfile.SetContentFile(file_path)
+                                gfile.Upload()
+                                print(f"Uploaded: {file_path}")
+                        QMessageBox.information(self, "Success", f"Uploaded folder: {folder_path}")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+                else:
+                    QMessageBox.critical(self, "Error", "Invalid Google Drive Folder URL.")
 
     def open_assign_folder_dialog(self):
         assign_folder_dialog = AssignFolderDialog()
@@ -406,6 +672,52 @@ class FolderUploadDialog(QDialog):
 
     def get_folder_path(self):
         return self.folder_path
+
+class FolderNotice(QDialog):
+    def __init__(self, string, parent=None):
+        super(FolderNotice, self).__init__(parent)
+
+        # Icon
+        icon = QIcon()
+        icon.addPixmap(QPixmap("icon.jpg"), QIcon.Mode.Disabled)
+        self.setWindowIcon(icon)
+
+        self.setWindowTitle("Notification")
+        self.setFixedSize(600, 300)
+
+        self.layout = QVBoxLayout()
+
+        self.label = QLabel(f"Access to the link and download the folder: {string}!")
+        self.layout.addWidget(self.label)
+
+        self.open_link = QPushButton("Open Link")
+        self.open_link.clicked.connect(self.link_click)
+        self.layout.addWidget(self.open_link)
+
+        self.upload_btn = QPushButton("Upload Folder")
+        self.upload_btn.clicked.connect(self.upload_folder)
+        self.layout.addWidget(self.upload_btn)
+
+        self.setLayout(self.layout)
+        self.string = string
+        self.uploaded = False
+
+    def link_click(self):
+        webbrowser.open_new(self.string)
+
+    def upload_folder(self):
+        self.close()
+
+    def closeEvent(self, event):
+        if not self.uploaded:
+            reply = QMessageBox.question(self, 'Warning', 'You must upload the folder.',
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.No:
+                event.ignore()
+            else:
+                event.accept()
+        else:
+            event.accept()
 
 class LabelsTool(QDialog):
     def __init__(self, username, role):
@@ -419,6 +731,10 @@ class LabelsTool(QDialog):
         self.resized_mode = False
         self.convert_mode = False
         self.index = -1
+        self.cropping = False
+        self.crop_points = []
+        self.current_image = None
+        self.pixmap = None
         
         self.initDialog()
         self.initKeyBoard()
@@ -426,11 +742,10 @@ class LabelsTool(QDialog):
         self.setupButton()
         self.retranslateUi()
 
-        
         self.username = username
         self.role = role
 
-    def closeEvent(self, event):
+    def closePage(self, event):
         client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
         db = client['user']
         users_collection = db['users']
@@ -449,29 +764,48 @@ class LabelsTool(QDialog):
         user = users_collection.find_one({'username': self.username})
         return user.get('assigned_folder')
     
+    def change_view_mode(self):
+        if self.index == -1:
+            self.show_notification_pop_up("Need image", "Warn")
+            return
+        
+        _translate = QCoreApplication.translate
+        self.resized_mode = not(self.resized_mode)
+        self.view_mode.setText(_translate("Dialog", "Fit Size" if not(self.resized_mode) else "Real Size")) 
+        self.show_image(self.index, self.resized_mode)
+    
     def load_image_dir_func(self):
         if self.role == "admin":
             self.open_folder_upload_dialog()
         else:
-            
             self.fname = self.get_assigned_save_folder()
-        
-        if self.fname:
-            # Hiển thị đường dẫn tải về trong hộp thoại
-            QMessageBox.information(self, "Download Assigned Folder", f"Please download your assigned folder from the following link then upload the downloaded folder:\n{self.fname}")
-            # Load image
-            self.fname = QFileDialog.getExistingDirectory(self, 'Open Folder', "C:\\")
-        
-            if os.path.exists(self.fname):
-                self.dataset = os.listdir(self.fname)
-                self.index = 0
-                self.show_image(self.index)
-            
-                self.total_image_label.setText("/" + str(len(self.dataset)))
-        else:
-            QMessageBox.information(self, "No Folder Assigned", "No folder has been assigned to you yet. Please contact the admin.")
-        
 
+            if self.fname:
+                FolderNotice(self.fname).exec()
+
+                # Load image
+                self.fname = QFileDialog.getExistingDirectory(self, 'Open Folder', "C:\\")
+                self.csv_path = os.path.join(self.fname, "label_image.csv")
+
+                if os.path.exists(self.fname):
+                    self.dataset = os.listdir(self.fname)
+                    self.index = 0
+                    self.show_image(self.index, self.resized_mode)
+                    self.total_image_label.setText("/" + str(len(self.dataset)))
+
+                # Kiểm tra csv_path sau khi fname đã được gán giá trị
+                if not os.path.exists(self.csv_path):
+                    self.csv_file = pd.DataFrame()
+                    self.csv_file["Name"] = pd.Series(self.dataset)
+                    self.csv_file["Rating"] = pd.Series([])
+                    self.csv_file.to_csv(self.csv_path, index=False)
+                else:
+                    self.csv_file = pd.read_csv(self.csv_path)
+
+                self.show_image(self.index, self.resized_mode)
+            else:
+                QMessageBox.information(self, "No Folder Assigned", "No folder has been assigned to you yet. Please contact the admin.")
+            
     def open_folder_upload_dialog(self):
         dialog = FolderUploadDialog()
         if dialog.exec():
@@ -479,60 +813,9 @@ class LabelsTool(QDialog):
             if self.fname and os.path.exists(self.fname):
                 self.dataset = os.listdir(self.fname)
                 self.index = 0
-                self.show_image(self.index, self.resized_mode, self.convert_mode)
+                self.show_image(self.index, self.resized_mode)
                 self.total_image_label.setText("/" + str(len(self.dataset)))
     
-    def choose_excel_folder(self):
-        if self.dataset is None:
-            msg = QMessageBox(self)
-            msg.setIcon(QMessageBox.Icon.Information)
-            msg.setText("You should click to \"Select Dir\" button to choose image dir")
-            msg.setWindowTitle("Warn")
-            msg.exec()
-        else:
-            if self.role == "employer":
-                self.csv_folder = QFileDialog.getExistingDirectory(self, 'Open Folder', "C:\\")
-                self.csv_path = os.path.join(self.csv_folder, "label_image.csv")
-
-            if not(os.path.exists(self.csv_path)):
-                self.csv_file = pd.DataFrame()
-                self.csv_file["Name"] = pd.Series(self.dataset)
-                self.csv_file["Rating"] = pd.Series([])
-                self.csv_file.to_csv(self.csv_path, index=False)
-
-            else:
-                self.csv_file = pd.read_csv(self.csv_path)
-                
-                self.show_image(self.index)
-            
-            # Đọc nội dung của file CSV
-            with open(self.csv_path, 'r') as file:
-                csv_content = file.read()
-
-            # Lưu nội dung của file CSV vào cơ sở dữ liệu
-            client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
-            db = client['user']
-            users_collection = db['users']
-            users_collection.update_one({'username': self.username}, {"$set": {'csv_content': csv_content}})
-            QMessageBox.information(self, "Success", f"CSV content saved for {self.username}")
-                
-            self.show_image(self.index)
-
-
-    def save_csv_content_to_db(self):
-        if self.csv_path and self.username:
-            # Đọc nội dung của file CSV
-            with open(self.csv_path, 'r') as file:
-                csv_content = file.read()
-
-            # Lưu nội dung của file CSV vào cơ sở dữ liệu
-            client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
-            db = client['user']
-            users_collection = db['users']
-            users_collection.update_one({'username': self.username}, {"$set": {'csv_content': csv_content}})
-            QMessageBox.information(self, "Success", f"CSV content saved for {self.username}")
-
-
     def read_csv_from_folder(self, folder_path):
         csv_path = os.path.join(folder_path, "label_image.csv")
         if os.path.exists(csv_path):
@@ -542,7 +825,7 @@ class LabelsTool(QDialog):
             print(f"CSV file 'label_image.csv' not found in folder '{folder_path}'")
         return None
         
-    def show_image(self, index):
+    def show_image(self, index, resized_mode):
         name = self.dataset[index]
         print(name, self.fname)
         # current_image = cv2.imread(os.path.join(self.fname, name))
@@ -555,13 +838,15 @@ class LabelsTool(QDialog):
         
         image = QImage(current_image, current_image.shape[1], current_image.shape[0], current_image.shape[1] * 3, QImage.Format.Format_RGB888)
         pixmap = QPixmap(image)
-        
-        width, height = self.showscreen.width(), self.showscreen.height()
-        pixmap = pixmap.scaled(width, height, Qt.AspectRatioMode.KeepAspectRatio)
-         
+
+        if not resized_mode:
+            fixed_width, fixed_height = 800, 600  # Define fixed size
+            pixmap = pixmap.scaled(fixed_width, fixed_height, Qt.AspectRatioMode.KeepAspectRatio)
+        else:
+            width, height = self.showscreen.width(), self.showscreen.height()
+            pixmap = pixmap.scaled(width, height, Qt.AspectRatioMode.KeepAspectRatio)
         self.showscreen.setPixmap(pixmap)
-        
-        
+
         # Hiển thị rating đã label (nếu có)
         rating_label = self.get_image_rating(name)
         
@@ -574,6 +859,62 @@ class LabelsTool(QDialog):
             
         # Update the index in image_index
         self.update_index_label(self.index)
+
+    def crop_image(self):
+        # Lấy đường dẫn của ảnh hiện tại từ dataset và fname
+        index = self.index  # hoặc self.index, tùy vào cách bạn lưu trữ
+        if index < 0 or index >= len(self.dataset):
+            return
+
+        name = self.dataset[index]
+        image_path = os.path.join(self.fname, name)
+
+        # Đọc ảnh từ đường dẫn sử dụng OpenCV
+        current_image = cv2.imread(image_path)
+        if current_image is None:
+            QMessageBox.critical(self, "Error", f"Could not open image: {image_path}")
+            return
+
+        # Hiển thị cửa sổ chứa bức ảnh để crop
+        cv2.namedWindow("Crop Image", cv2.WINDOW_NORMAL)
+        cv2.imshow("Crop Image", cv2.cvtColor(current_image, cv2.COLOR_BGR2RGB))
+
+        # Chờ người dùng chọn 4 điểm để crop
+        points = cv2.selectROI("Crop Image", current_image, fromCenter=False)
+        cv2.destroyWindow("Crop Image")
+
+        # Nếu không có điểm nào được chọn, thoát
+        if all(x == 0 for x in points):
+            return
+        
+        # Xác nhận lại thao tác crop
+        reply = QMessageBox.question(
+            self,
+            'Confirm Crop',
+            'Do you want to save the cropped image?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.No:
+            # Nếu người dùng không đồng ý, gọi lại hàm crop_image để thực hiện lại thao tác crop
+            self.crop_image()
+            return
+
+        # Cắt ảnh từ 4 điểm được chọn
+        x, y, w, h = points
+        cropped_image = current_image[y:y+h, x:x+w]
+
+        # Lưu ảnh mới vào đường dẫn ban đầu
+        if not cv2.imwrite(image_path, cropped_image):
+            QMessageBox.critical(self, "Error", "Could not save cropped image.")
+            return
+
+        # Cập nhật lại hiển thị ảnh đã cắt trong QLabel showscreen
+        self.show_image(index, resized_mode=False)  # Cập nhật lại hiển thị với ảnh mới
+
+        # Hiển thị thông báo thành công
+        QMessageBox.information(self, "Crop Image", "Image cropped and saved successfully.")
         
     def get_image_rating(self, name):
         if self.csv_file is None:
@@ -645,18 +986,36 @@ class LabelsTool(QDialog):
 
             self.csv_file = pd.concat([self.csv_file, new_record], axis=0)
         else:
-        
             index = list(index)[0]
-            
             self.csv_file.iat[index, 1] = int(rating)
+
+        # Save CSV file
+        self.csv_file.to_csv(self.csv_path, index=False)
         
+        # Update MongoDB
+        with open(self.csv_path, 'r') as file:
+            csv_content = file.read()
+        client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
+        db = client['user']
+        users_collection = db['users']
+        users_collection.update_one({'username': self.username}, {"$set": {'csv_content': csv_content}})
+
+        print("Auto-saved label for", name, "with rating", rating)  # Debugging statement
+
     def save_csv(self):
-        
         if self.csv_file is not None and self.csv_path is not None:
             self.csv_file.to_csv(self.csv_path, index=False)
-            
-            self.show_notification_pop_up("Save successfully", "Sucess")
-        
+            self.show_notification_pop_up("Save successfully", "Success")
+
+            with open(self.csv_path, 'r') as file:
+                csv_content = file.read()
+            client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
+            db = client['user']
+            users_collection = db['users']
+            users_collection.update_one({'username': self.username}, {"$set": {'csv_content': csv_content}})
+
+            print("CSV file saved")  # Debugging statement
+
     # Save file when closing app 
     def closeEvent(self, event):
         if self.csv_file is not None and self.csv_path is not None:
@@ -692,7 +1051,7 @@ class LabelsTool(QDialog):
         self.auto_save_label(name, self.label)
             
         self.index += 1
-        self.show_image(self.index)      
+        self.show_image(self.index, self.resized_mode)      
         
     def go_prev_image(self):
         print("Previous image")
@@ -717,7 +1076,7 @@ class LabelsTool(QDialog):
         self.auto_save_label(name, self.label)
             
         self.index -= 1
-        self.show_image(self.index)
+        self.show_image(self.index, self.resized_mode)
     
     def update_index_label(self, index):
         self.image_index.setText("{}".format(index + 1))
@@ -732,9 +1091,8 @@ class LabelsTool(QDialog):
             self.auto_save_label(name, self.label)
             
             self.index = image_index - 1
-            self.show_image(self.index, self.resized_mode, self.convert_mode)
+            self.show_image(self.index, self.resized_mode)
             
-        
     def initDialog(self):
         # Icon
         icon = QIcon()
@@ -774,23 +1132,30 @@ class LabelsTool(QDialog):
                                       "background-color: rgb(85, 255, 255);\n""color: #000000;")
         self.dir_selection_btn.setObjectName("dir_selection")
 
-        # Save xlsx dir selection
-        self.save_dir_btn = QPushButton(self.screenStatic)
-        self.save_dir_btn.setGeometry(QRect(60, 190, 211, 51))
-        self.save_dir_btn.setStyleSheet("border-radius: 20px;\n""font: 75 16pt \"MS Shell Dlg 2\";\n"
-                                      "background-color: rgb(85, 255, 255);\n""color: #000000;")
-        self.save_dir_btn.setObjectName("save_dir_btn")
-        
+        # Add crop button
+        self.crop_btn = QPushButton(self.screenStatic)
+        self.crop_btn.setGeometry(QRect(60, 260, 211, 51))
+        self.crop_btn.setStyleSheet("border-radius: 20px;\n""font: 75 16pt \"MS Shell Dlg 2\";\n"
+                                  "background-color: rgb(85, 255, 255);\n""color: #000000;")
+        self.crop_btn.setObjectName("crop_btn")
+
         # Manual save button 
         self.manual_save_btn = QPushButton(self.screenStatic)
-        self.manual_save_btn.setGeometry(QRect(60, 260, 211, 51))
+        self.manual_save_btn.setGeometry(QRect(60, 190, 211, 51))
         self.manual_save_btn.setStyleSheet("border-radius: 20px;\n""font: 75 16pt \"MS Shell Dlg 2\";\n"
                                       "background-color: rgb(85, 255, 255);\n""color: #000000;")
         self.manual_save_btn.setObjectName("manual_save_btn")
 
+        # Change view image mode
+        self.view_mode = QPushButton(self.screenStatic)
+        self.view_mode.setGeometry(QRect(60, 330, 211, 51))
+        self.view_mode.setStyleSheet("border-radius: 20px;\n""font: 75 16pt \"MS Shell Dlg 2\";\n"
+                                      "background-color: rgb(85, 255, 255);\n""color: #000000;")
+        self.view_mode.setObjectName("view")
+
         # Back to Menu
         self.main_menu_btn = QPushButton(self.screenStatic)
-        self.main_menu_btn.setGeometry(QRect(60, 330, 211, 51))
+        self.main_menu_btn.setGeometry(QRect(60, 400, 211, 51))
         self.main_menu_btn.setStyleSheet("border-radius: 20px;\n""font: 75 16pt \"MS Shell Dlg 2\";\n"
                                       "background-color: rgb(85, 255, 255);\n""color: #000000;")
         self.main_menu_btn.setObjectName("main_menu")
@@ -854,8 +1219,8 @@ class LabelsTool(QDialog):
         self.welcome2.setText(_translate("Dialog", "Image:"))
         # Chọn đường dẫn đến folder chứa ảnh cần gán nhãn
         self.dir_selection_btn.setText(_translate("Dialog", "Select Dir"))
-        # Chọn đường dẫn chứa file csv gán nhãn
-        self.save_dir_btn.setText(_translate("Dialog", "Select Save Dir"))
+        # Thay đổi cách view hình ảnh
+        self.view_mode.setText(_translate("Dialog", "Fit Size" if not(self.resized_mode) else "Real Size"))
         # Label result 
         self.result_label.setText(_translate("Dialog", "Result:"))
         # Manual save 
@@ -864,34 +1229,212 @@ class LabelsTool(QDialog):
         self.change_image_btn.setText(_translate("Dialog", "Go"))
         #Back to menu
         self.main_menu_btn.setText(_translate("Dialog", "Back"))
+        # Crop button
+        self.crop_btn.setText(_translate("Dialog", "Crop Image"))
         
     def setupButton(self):
         self.dir_selection_btn.clicked.connect(self.load_image_dir_func)
-        self.save_dir_btn.clicked.connect(self.choose_excel_folder)
+        self.view_mode.clicked.connect(self.change_view_mode)
         self.manual_save_btn.clicked.connect(self.save_csv)
         self.change_image_btn.clicked.connect(self.go_to_image)
         self.main_menu_btn.clicked.connect(self.main_menu)
+        self.crop_btn.clicked.connect(self.crop_image)
 
 class Detect(QWidget):
     def __init__(self, username, role):
         super().__init__()
+
+        # Icon
+        icon = QIcon()
+        icon.addPixmap(QPixmap("icon.jpg"), QIcon.Mode.Disabled)
+        self.setWindowIcon(icon)
+
         self.setWindowTitle("Detector")
         self.resize(600, 300)
+        self.username = username
+        self.role = role
         
         layout = QGridLayout()
 
-        label = QLabel("Detector window!")
-        layout.addWidget(label, 0, 0, 1, 3, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.video_label = QLabel("No video selected")
+        layout.addWidget(self.video_label, 1, 0, 1, 3, Qt.AlignmentFlag.AlignCenter)
+
+        self.upload_button = QPushButton("Upload Video")
+        self.upload_button.setFixedSize(100, 50)
+        layout.addWidget(self.upload_button, 2, 0, Qt.AlignmentFlag.AlignCenter)
+        self.upload_button.clicked.connect(self.upload_video)
+
+        self.train_button = QPushButton("Train Model")
+        self.train_button.setFixedSize(100, 50)
+        layout.addWidget(self.train_button, 3, 0, Qt.AlignmentFlag.AlignCenter)
+        self.train_button.clicked.connect(self.train_model)
+
+        self.preview_button = QPushButton("Preview Video")
+        self.preview_button.setFixedSize(100, 50)
+        layout.addWidget(self.preview_button, 2, 1, Qt.AlignmentFlag.AlignCenter)
+        self.preview_button.clicked.connect(self.toggle_preview)
+        self.preview_button.setEnabled(False)
+
+        self.detect_button = QPushButton("Run Detection")
+        self.detect_button.setFixedSize(100, 50)
+        layout.addWidget(self.detect_button, 3, 1, Qt.AlignmentFlag.AlignCenter)
+        self.detect_button.clicked.connect(self.toggle_detection)
+        self.detect_button.setEnabled(False)
 
         button1 = QPushButton("Back")
         button1.setFixedSize(100, 50)
-        layout.addWidget(button1, 1, 1, Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(button1, 2, 2, Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignCenter)
         button1.clicked.connect(self.main_menu)
-        
-        self.username = username
-        self.role = role
+
+        self.model = YOLO('yolov8n.pt')
+        self.video_path = None
+        self.cap = None
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_frame)
+        self.is_detecting = False
+        self.is_previewing = False
 
         self.setLayout(layout)
+
+    def upload_video(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Video", "", "Video Files (*.mp4 *.avi *.mkv)")
+        if file_path:
+            self.video_path = file_path
+            self.video_label.setText(f"Selected Video: {file_path}")
+            self.preview_button.setEnabled(True)
+            self.detect_button.setEnabled(True)
+
+    def toggle_preview(self):
+        if self.is_previewing:
+            self.stop_preview()
+        else:
+            self.start_preview()
+
+    def start_preview(self):
+        if not self.video_path:
+            return
+
+        self.cap = cv2.VideoCapture(self.video_path)
+        self.timer.start(30)  # Adjust the timer interval as needed
+        self.preview_button.setText("Stop Preview")
+        self.detect_button.setEnabled(False)
+        self.is_previewing = True
+
+    def stop_preview(self):
+        if self.cap:
+            self.cap.release()
+        self.timer.stop()
+        self.preview_button.setText("Preview Video")
+        self.detect_button.setEnabled(True)
+        self.is_previewing = False
+
+    def toggle_detection(self):
+        if self.is_detecting:
+            self.stop_detection()
+        else:
+            self.start_detection()
+
+    def start_detection(self):
+        if not self.video_path:
+            return
+
+        self.cap = cv2.VideoCapture(self.video_path)
+        self.timer.start(30)  # Adjust the timer interval as needed
+        self.detect_button.setText("Stop Detection")
+        self.preview_button.setEnabled(False)
+        self.is_detecting = True
+
+    def stop_detection(self):
+        if self.cap:
+            self.cap.release()
+        self.timer.stop()
+        self.detect_button.setText("Run Detection")
+        self.preview_button.setEnabled(True)
+        self.is_detecting = False
+
+    def update_frame(self):
+        ret, frame = self.cap.read()
+        if not ret:
+            self.stop_preview() if self.is_previewing else self.stop_detection()
+            return
+
+        if self.is_detecting:
+            results = self.model.predict(frame, conf=0.25)
+            object_count = 0
+            for result in results:
+                boxes = result.boxes
+                object_count += len(boxes)  # Đếm số lượng vật thể
+                for box in boxes:
+                    x1, y1, x2, y2 = box.xyxy[0]
+                    cv2.rectangle(frame, (int(x1), (int(y1)), int(x2), int(y2)), (0, 255, 0), 2)
+
+            # Lưu số lượng vật thể vào cơ sở dữ liệu
+            client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
+            db = client['user']
+            detections_collection = db['detections']
+            detection_record = {
+                'object_count': object_count,
+            }
+            detections_collection.insert_one(detection_record)
+
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width, channel = frame.shape
+        bytes_per_line = 3 * width
+        q_img = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(q_img)
+        self.video_label.setPixmap(pixmap)
+
+    def train_model(self):
+        # Tải mô hình AlexNet đã huấn luyện trước
+        model = torch.hub.load('pytorch/vision:v0.10.0', 'alexnet', pretrained=True)
+        model.eval()
+
+        # Đường dẫn đến thư mục chứa ảnh của bạn
+        folder_path = "dataset/train"
+
+        # Tiền xử lý ảnh
+        preprocess = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+        # Di chuyển model đến GPU nếu có để tăng tốc độ
+        if torch.cuda.is_available():
+            model.to('cuda')
+
+        # Đọc các danh mục
+        with open("image_classes.txt", "r") as f:
+            categories = [s.strip() for s in f.readlines()]
+
+        # Duyệt qua tất cả các tệp trong thư mục
+        for filename in os.listdir(folder_path):
+            if filename.endswith(".jpg") or filename.endswith(".jpeg") or filename.endswith(".png"):  # Kiểm tra định dạng tệp ảnh
+                file_path = os.path.join(folder_path, filename)
+                input_image = Image.open(file_path)
+
+                # Tiền xử lý ảnh
+                input_tensor = preprocess(input_image)
+                input_batch = input_tensor.unsqueeze(0)  # tạo một mini-batch như mong đợi của mô hình
+
+                # Di chuyển input đến GPU nếu có
+                if torch.cuda.is_available():
+                    input_batch = input_batch.to('cuda')
+
+                with torch.no_grad():
+                    output = model(input_batch)
+
+                # Để lấy xác suất, bạn có thể chạy softmax trên nó
+                probabilities = torch.nn.functional.softmax(output[0], dim=0)
+
+                # Hiển thị các danh mục hàng đầu cho mỗi ảnh
+                top5_prob, top5_catid = torch.topk(probabilities, 5)
+                print(f"Results for {filename}:")
+                for i in range(top5_prob.size(0)):
+                    print(f"{categories[top5_catid[i]]}: {top5_prob[i].item()}")
+                print("\n" + "-"*30 + "\n")  # Để phân cách kết quả giữa các ảnh
 
     def closeEvent(self, event):
         client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
@@ -909,8 +1452,14 @@ class Detect(QWidget):
 class StatisticForm(QWidget):
     def __init__(self, username, role):
         super().__init__()
+
+        # Icon
+        icon = QIcon()
+        icon.addPixmap(QPixmap("icon.jpg"), QIcon.Mode.Disabled)
+        self.setWindowIcon(icon)
+
         self.setWindowTitle("Statistics")
-        self.resize(800, 600)
+        self.resize(900, 700)
         
         layout = QVBoxLayout()
 
@@ -919,20 +1468,28 @@ class StatisticForm(QWidget):
         button0.clicked.connect(self.main_menu)
         layout.addWidget(button0)
 
+        # Calculate the total number of assigned folders
+        total_assigned_folders = self.count_assigned_folders()
+
+        # Create a label to display the total number of assigned folders
+        self.assigned_folders_label = QLabel(f"Total assigned folders: {total_assigned_folders}")
+        self.assigned_folders_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.assigned_folders_label)
+
         self.username = username
         self.role = role
         self.setLayout(layout)
 
         chart_container = QWidget()
+        self.resize(800, 700)
         layout.addWidget(chart_container)
 
-        # Kết nối MongoDB và lấy dữ liệu
-        self.client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
-        self.db = self.client['user']
-        self.data_collection = self.db['data']
-        data = self.fetch_data()
+        # Prepare data
+        data1 = self.count_rated_images()
+        data2 = self.count_object()
+        data = {'Detected objects': data2, 'Labelled image': data1}
 
-        # Tạo biểu đồ và thêm vào QWidget
+        # Create the bar chart and add it to QWidget
         self.plot_bar_chart(data, chart_container)
 
     def main_menu(self):
@@ -947,50 +1504,82 @@ class StatisticForm(QWidget):
         users_collection.update_one({'username': self.username}, {"$set": {'status': 'off'}})
         event.accept()
 
-    def fetch_data(self):
-        data = {
-            'January': {'xe_ga': 0, 'xe_so': 0},
-            'February': {'xe_ga': 0, 'xe_so': 0},
-            'March': {'xe_ga': 0, 'xe_so': 0},
-            # Thêm các tháng khác tương tự
-        }
+    def count_assigned_folders(self):
+        # Connect to MongoDB and get the list of employees
+        client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
+        db = client['user']
+        employees_collection = db['users']
+        employees = employees_collection.find({"role": "employer"})
+    
+        total_assigned_folders = 0
+    
+        for employee in employees:
+            if 'assigned_folder' in employee and employee['assigned_folder']:
+                total_assigned_folders += 1
+    
+        return total_assigned_folders
 
-        cursor = self.data_collection.find()
-        for document in cursor:
-            month = document['month']
-            if document['type'] == 'xe_ga':
-                data[month]['xe_ga'] += 1
-            elif document['type'] == 'xe_so':
-                data[month]['xe_so'] += 1
+    def count_rated_images(self):
+        # Connect to MongoDB and get the list of employees
+        client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
+        db = client['user']
+        employees_collection = db['users']
+        employees = employees_collection.find({"role": "employer"})
+    
+        total_rated_images = 0
+    
+        for employee in employees:
+            if 'csv_content' in employee:
+                csv_content = employee['csv_content']
+                # Convert the CSV content into a DataFrame
+                csv_df = pd.read_csv(StringIO(csv_content))
+                # Count the number of images that have been rated
+                rated_images = csv_df['Rating'].notnull().sum()
+                total_rated_images += rated_images
+    
+        return total_rated_images
+    
+    def count_object(self):
+        client = MongoClient('mongodb+srv://hai798:Hai2001@application.ssy3iml.mongodb.net/')
+        db = client['user']
+        object_collection = db['detections']
+        objects = object_collection.find()
+        total_object = 0
 
-        return data
+        for object in objects:
+            if 'object_count' in object:
+                total_object += object['object_count']
+
+        return total_object
 
     def plot_bar_chart(self, data, container):
-        months = list(data.keys())
-        xe_ga = [data[month]['xe_ga'] for month in months]
-        xe_so = [data[month]['xe_so'] for month in months]
+        categories = list(data.keys())
+        counts = [data[category] for category in categories]
+        colors = ['blue', 'green']  # Different colors for each bar
 
         fig, ax = plt.subplots()
-        x = np.arange(len(months))
-        width = 0.35
+        y_pos = np.arange(len(categories))
+        bar_width = 0.4  # Set bar thickness
 
-        rects1 = ax.bar(x - width/2, xe_ga, width, label='Xe Ga')
-        rects2 = ax.bar(x + width/2, xe_so, width, label='Xe So')
+        bars = ax.barh(y_pos, counts, align='center', color=colors, height=bar_width)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(categories)
+        ax.set_xlabel('Count')
+        ax.set_title('Statistics')
 
-        ax.set_xlabel('Tháng')
-        ax.set_ylabel('Số lượng')
-        ax.set_title('Số lượng xe ga và xe số theo tháng')
-        ax.set_xticks(x)
-        ax.set_xticklabels(months)
-        ax.legend()
+        # Display value at the end of each bar
+        for i, bar in enumerate(bars):
+            ax.text(bar.get_width(), bar.get_y() + bar.get_height() / 2, str(counts[i]),
+                    va='center', ha='right', color='white', fontweight='bold')
 
-        plt.xticks(rotation=45, ha='right')
+        # Add legend
+        ax.legend(bars, categories)
 
         # Tạo một FigureCanvas từ biểu đồ và thêm vào container
         canvas = FigureCanvas(fig)
         layout = QVBoxLayout(container)
         layout.addWidget(canvas)
-        
+
 app = QApplication(sys.argv)
 window = LoginForm()
 window.show()
